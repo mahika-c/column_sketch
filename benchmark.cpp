@@ -188,6 +188,73 @@ ColumnSketch build_column_sketch(const std::vector<uint32_t>& base) {
     return cs;
 }
 
+// ------------------------------------------------------------
+// BitWeaving/V (vertical bit-sliced layout for 32-bit integers)
+// ------------------------------------------------------------
+
+struct BitWeavingV {
+    static constexpr int BITS = 32;
+    std::size_t n = 0;         // number of tuples
+    std::size_t n_words = 0;   // number of 64-row groups
+    // words[w][b] holds bit b (0..31) for rows [64*w, 64*w+63]
+    std::vector<std::array<std::uint64_t, BITS>> words;
+};
+
+BitWeavingV build_bitweaving_v(const std::vector<uint32_t>& base) {
+    BitWeavingV bw;
+    bw.n = base.size();
+    bw.n_words = (bw.n + 63) / 64;
+    bw.words.assign(bw.n_words, {}); // zero-initialize all bit-planes
+
+    for (std::size_t i = 0; i < bw.n; ++i) {
+        uint32_t v = base[i];
+        std::size_t w = i / 64;
+        std::size_t bit_idx = i % 64;
+        std::uint64_t mask = 1ULL << bit_idx;
+        for (int b = 0; b < BitWeavingV::BITS; ++b) {
+            if (v & (1u << b)) {
+                bw.words[w][b] |= mask;
+            }
+        }
+    }
+    return bw;
+}
+
+// Bit-sliced comparison for col < x over 64-row groups.
+std::size_t bwv_scan_less(const BitWeavingV& bw, uint32_t x) {
+    if (bw.n == 0) return 0;
+
+    const int BITS = BitWeavingV::BITS;
+    std::size_t total = 0;
+
+    std::size_t last_bits = bw.n % 64;
+    std::uint64_t last_mask = last_bits ? ((1ULL << last_bits) - 1ULL) : ~0ULL;
+
+    for (std::size_t w = 0; w < bw.n_words; ++w) {
+        std::uint64_t active = (w == bw.n_words - 1) ? last_mask : ~0ULL;
+        std::uint64_t lt = 0;
+        std::uint64_t eq = active;
+
+        // Process from MSB to LSB.
+        for (int b = BITS - 1; b >= 0; --b) {
+            std::uint64_t xi = bw.words[w][b];
+            uint32_t cbit = (x >> b) & 1u;
+            std::uint64_t cword = cbit ? active : 0ULL;
+
+            // Standard bit-sliced < logic:
+            // lt |= (~xi & ci & eq);
+            lt |= (~xi & cword & eq);
+            // eq &= ~(xi ^ ci);
+            eq &= ~(xi ^ cword);
+        }
+
+        std::uint64_t res = lt & active;
+        total += static_cast<std::size_t>(__builtin_popcountll(res));
+    }
+
+    return total;
+}
+
 // Helper: S(x) = code for query constant x
 uint8_t cs_code_for_value(const ColumnSketch& cs, uint32_t x) {
     int lo = 0, hi = 255, pos = 255;
@@ -358,6 +425,25 @@ void run_all_numeric(std::size_t n) {
                       << secs << " s, "
                       << tuples_per_sec / 1e6 << " Mtuples/s\n";
         }
+
+        // BitWeaving/V
+        {
+            BitWeavingV bw = build_bitweaving_v(d.base);
+
+            volatile std::size_t warm = bwv_scan_less(bw, predicate_value);
+            (void)warm;
+
+            double secs = time_seconds([&]() {
+                volatile std::size_t res = bwv_scan_less(bw, predicate_value);
+                (void)res;
+            });
+
+            double tuples_per_sec = static_cast<double>(n) / secs;
+            std::cout << "bwv  uniform: "
+                      << std::fixed << std::setprecision(6)
+                      << secs << " s, "
+                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
+        }
     }
 
     std::cout << "\n";
@@ -402,6 +488,25 @@ void run_all_numeric(std::size_t n) {
                       << secs << " s, "
                       << tuples_per_sec / 1e6 << " Mtuples/s\n";
         }
+
+        // BitWeaving/V
+        {
+            BitWeavingV bw = build_bitweaving_v(d.base);
+
+            volatile std::size_t warm = bwv_scan_less(bw, predicate_value);
+            (void)warm;
+
+            double secs = time_seconds([&]() {
+                volatile std::size_t res = bwv_scan_less(bw, predicate_value);
+                (void)res;
+            });
+
+            double tuples_per_sec = static_cast<double>(n) / secs;
+            std::cout << "bwv  categorical: "
+                      << std::fixed << std::setprecision(6)
+                      << secs << " s, "
+                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
+        }
     }
 }
 
@@ -433,7 +538,7 @@ int main(int argc, char** argv) {
     if (argc < 5) {
         std::cerr << "Usage: "
                   << argv[0]
-                  << " {scan|cs} {uniform|categorical} {numeric} N\n";
+                  << " {scan|cs|bwv} {uniform|categorical} {numeric} N [predicate]\n";
         return 1;
     }
 
@@ -510,6 +615,24 @@ int main(int argc, char** argv) {
 
         double tuples_per_sec = static_cast<double>(n) / secs;
         std::cout << "CS scan:   "
+                  << std::fixed << std::setprecision(6)
+                  << secs << " s, "
+                  << tuples_per_sec / 1e6 << " Mtuples/s\n";
+    } else if (method == "bwv") {
+        std::cout << "Building BitWeaving/V layout...\n";
+        BitWeavingV bw = build_bitweaving_v(d.base);
+
+        // warmup
+        volatile std::size_t warm = bwv_scan_less(bw, predicate_value);
+        (void)warm;
+
+        double secs = time_seconds([&]() {
+            volatile std::size_t res = bwv_scan_less(bw, predicate_value);
+            (void)res;
+        });
+
+        double tuples_per_sec = static_cast<double>(n) / secs;
+        std::cout << "BWV scan:  "
                   << std::fixed << std::setprecision(6)
                   << secs << " s, "
                   << tuples_per_sec / 1e6 << " Mtuples/s\n";
