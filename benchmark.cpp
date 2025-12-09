@@ -42,7 +42,7 @@ struct Dataset {
     std::vector<uint32_t> base;  // base column
 };
 
-Dataset make_uniform_numeric(std::size_t n, uint32_t min_v = 0, uint32_t max_v = 1'000'000'000) {
+Dataset make_uniform_numeric(std::size_t n, uint32_t min_v = 0, uint32_t max_v = 65535) {
     Dataset d;
     d.base.resize(n);
     std::mt19937_64 rng(42);
@@ -71,44 +71,16 @@ Dataset make_categorical(std::size_t n, std::size_t num_categories = 10'000) {
 // SELECT count(*) WHERE col < x
 // ------------------------------------------------------------
 
-std::size_t full_scan_less_scalar(const std::vector<uint32_t>& col, uint32_t x) {
-    std::size_t cnt = 0;
-    const std::size_t n = col.size();
-    for (std::size_t i = 0; i < n; ++i) {
-        cnt += (col[i] < x);
-    }
-    return cnt;
-}
-
-// SIMD-accelerated version (falls back to scalar if AVX2 unavailable)
 std::size_t full_scan_less(const std::vector<uint32_t>& col, uint32_t x) {
-#ifdef __AVX2__
+    std::size_t cnt = 0;
     const std::size_t n = col.size();
     const uint32_t* data = col.data();
-    std::size_t cnt = 0;
-
-    const std::size_t step = 8; // 8 × 32-bit ints per AVX2 register
-    const std::size_t n_vec = (n / step) * step;
-
-    __m256i vx = _mm256_set1_epi32(static_cast<int32_t>(x));
-
-    std::size_t i = 0;
-    for (; i < n_vec; i += step) {
-        __m256i v   = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
-        // v < x  <=>  x > v
-        __m256i cmp = _mm256_cmpgt_epi32(vx, v);
-        int mask    = _mm256_movemask_ps(_mm256_castsi256_ps(cmp));
-        cnt += static_cast<std::size_t>(__builtin_popcount(mask));
-    }
-
-    // Remainder
-    for (; i < n; ++i) {
-        cnt += (data[i] < x);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (data[i] < x) {
+            ++cnt;
+        }
     }
     return cnt;
-#else
-    return full_scan_less_scalar(col, x);
-#endif
 }
 
 // ------------------------------------------------------------
@@ -189,11 +161,11 @@ ColumnSketch build_column_sketch(const std::vector<uint32_t>& base) {
 }
 
 // ------------------------------------------------------------
-// BitWeaving/V (vertical bit-sliced layout for 32-bit integers)
+// BitWeaving/V (vertical bit-sliced layout)
 // ------------------------------------------------------------
 
 struct BitWeavingV {
-    static constexpr int BITS = 32;
+    static constexpr int BITS = 16;
     std::size_t n = 0;         // number of tuples
     std::size_t n_words = 0;   // number of 64-row groups
     // words[w][b] holds bit b (0..31) for rows [64*w, 64*w+63]
@@ -238,14 +210,13 @@ std::size_t bwv_scan_less(const BitWeavingV& bw, uint32_t x) {
         // Process from MSB to LSB.
         for (int b = BITS - 1; b >= 0; --b) {
             std::uint64_t xi = bw.words[w][b];
-            uint32_t cbit = (x >> b) & 1u;
-            std::uint64_t cword = cbit ? active : 0ULL;
+            std::uint64_t cword = ((x >> b) & 1u) ? active : 0ULL;
 
-            // Standard bit-sliced < logic:
-            // lt |= (~xi & ci & eq);
-            lt |= (~xi & cword & eq);
-            // eq &= ~(xi ^ ci);
-            eq &= ~(xi ^ cword);
+            std::uint64_t not_xi = ~xi;
+            std::uint64_t eq_and = ~(xi ^ cword);
+
+            lt |= (not_xi & cword & eq);
+            eq &= eq_and;
         }
 
         std::uint64_t res = lt & active;
