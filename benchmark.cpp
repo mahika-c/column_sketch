@@ -1,7 +1,7 @@
 // benchmark.cpp
 
 // Compilation Instructions:
-// g++ -O3 -march=native -std=c++17 -DNDEBUG benchmark.cpp -o bench
+// g++ -O3 -march=native -std=c++17 -DNDEBUG -funroll-loops benchmark.cpp -o bench
 
 // Running Instructions: (Bash)
 // ./bench scan uniform numeric 1000000000
@@ -67,6 +67,7 @@ std::size_t full_scan_less(const std::vector<uint32_t>& col, uint32_t x) {
     const std::size_t n = col.size();
     for (std::size_t i = 0; i < n; ++i) {
         if (col[i] < x) cnt++;
+        // cnt += (col[i] < x); // unrolled loop/branchless version
     }
     return cnt;
 }
@@ -165,26 +166,32 @@ uint8_t cs_code_for_value(const ColumnSketch& cs, uint32_t x) {
 
 // Probe: SELECT count(*) WHERE base < x using Column Sketch
 std::size_t cs_scan_less(const ColumnSketch& cs,
-                         const std::vector<uint32_t>& base,
-                         uint32_t x)
+    const std::vector<uint32_t>& base,
+    uint32_t x)
 {
-    const std::size_t n = base.size();
-    uint8_t sx = cs_code_for_value(cs, x);
+const std::size_t n = base.size();
+const uint8_t* codes = cs.codes.data();
+const uint32_t* b    = base.data();
 
-    std::size_t cnt = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        uint8_t code = cs.codes[i];
-        if (code < sx) {
-            // definitely qualifies
-            cnt++;
-        } else if (code == sx) {
-            // boundary bucket -> check base
-            if (base[i] < x) cnt++;
-        } else {
-            // code > sx => definitely fails
-        }
-    }
-    return cnt;
+uint8_t sx = cs_code_for_value(cs, x);
+uint32_t sx32 = sx;  // promote once
+
+std::size_t cnt = 0;
+
+// Branchless loop: the idea is
+// cnt += (code < sx) + ((code == sx) & (base < x));
+for (std::size_t i = 0; i < n; ++i) {
+uint32_t c = codes[i];  // promote to avoid repeated casts
+
+// These booleans become 0 or 1; bitwise & keeps it branchless.
+std::size_t less_code  = (c < sx32);
+std::size_t eq_code    = (c == sx32);
+std::size_t less_base  = (b[i] < x);
+
+cnt += less_code + (eq_code & less_base);
+}
+
+return cnt;
 }
 
 // ------------------------------------------------------------
