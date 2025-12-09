@@ -4,10 +4,16 @@
 // g++ -O3 -march=native -std=c++17 -DNDEBUG -funroll-loops benchmark.cpp -o bench
 
 // Running Instructions: (Bash)
-// ./bench scan uniform numeric 1000000000
-// ./bench cs uniform numeric 1000000000
-// ./bench scan categorical numeric 1000000000
-// ./bench cs categorical numeric 1000000000
+// ./bench all numeric 1000000000
+
+// Running Instructions: (Bash)
+// for method in scan cs; do
+//   for dist in uniform categorical; do
+//     echo "=== $method $dist numeric 1000000000 ==="
+//     /usr/bin/time -v ./bench "$method" "$dist" numeric 1000000000
+//     echo
+//   done
+// done
 
 #include <algorithm>
 #include <array>
@@ -66,8 +72,8 @@ std::size_t full_scan_less(const std::vector<uint32_t>& col, uint32_t x) {
     std::size_t cnt = 0;
     const std::size_t n = col.size();
     for (std::size_t i = 0; i < n; ++i) {
-        if (col[i] < x) cnt++;
-        // cnt += (col[i] < x); // unrolled loop/branchless version
+        // if (col[i] < x) cnt++;
+        cnt += (col[i] < x); // unrolled loop/branchless version
     }
     return cnt;
 }
@@ -213,10 +219,122 @@ double time_seconds(F&& f, int repeats = 5) {
 }
 
 // ------------------------------------------------------------
+// Convenience: run all four configurations in one go
+// ------------------------------------------------------------
+
+void run_all_numeric(std::size_t n) {
+    // Uniform dataset
+    {
+        Dataset d = make_uniform_numeric(n);
+        uint32_t predicate_value = 300'000'000; // ~30% selectivity
+
+        // Full scan
+        {
+            volatile std::size_t warm = full_scan_less(d.base, predicate_value);
+            (void)warm;
+
+            double secs = time_seconds([&]() {
+                volatile std::size_t res = full_scan_less(d.base, predicate_value);
+                (void)res;
+            });
+
+            double tuples_per_sec = static_cast<double>(n) / secs;
+            std::cout << "scan uniform: "
+                      << std::fixed << std::setprecision(6)
+                      << secs << " s, "
+                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
+        }
+
+        // Column Sketch
+        {
+            ColumnSketch cs = build_column_sketch(d.base);
+
+            volatile std::size_t warm = cs_scan_less(cs, d.base, predicate_value);
+            (void)warm;
+
+            double secs = time_seconds([&]() {
+                volatile std::size_t res = cs_scan_less(cs, d.base, predicate_value);
+                (void)res;
+            });
+
+            double tuples_per_sec = static_cast<double>(n) / secs;
+            std::cout << "cs   uniform: "
+                      << std::fixed << std::setprecision(6)
+                      << secs << " s, "
+                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
+        }
+    }
+
+    std::cout << "\n";
+
+    // Categorical dataset
+    {
+        Dataset d = make_categorical(n, 10'000);
+        uint32_t predicate_value = 5'000; // about half the categories
+
+        // Full scan
+        {
+            volatile std::size_t warm = full_scan_less(d.base, predicate_value);
+            (void)warm;
+
+            double secs = time_seconds([&]() {
+                volatile std::size_t res = full_scan_less(d.base, predicate_value);
+                (void)res;
+            });
+
+            double tuples_per_sec = static_cast<double>(n) / secs;
+            std::cout << "scan categorical: "
+                      << std::fixed << std::setprecision(6)
+                      << secs << " s, "
+                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
+        }
+
+        // Column Sketch
+        {
+            ColumnSketch cs = build_column_sketch(d.base);
+
+            volatile std::size_t warm = cs_scan_less(cs, d.base, predicate_value);
+            (void)warm;
+
+            double secs = time_seconds([&]() {
+                volatile std::size_t res = cs_scan_less(cs, d.base, predicate_value);
+                (void)res;
+            });
+
+            double tuples_per_sec = static_cast<double>(n) / secs;
+            std::cout << "cs   categorical: "
+                      << std::fixed << std::setprecision(6)
+                      << secs << " s, "
+                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
+        }
+    }
+}
+
+// ------------------------------------------------------------
 // Main benchmark driver
 // ------------------------------------------------------------
 
 int main(int argc, char** argv) {
+    // Batch mode: run all four configurations in one go.
+    if (argc >= 2 && std::string(argv[1]) == "all") {
+        if (argc != 4) {
+            std::cerr << "Usage: "
+                      << argv[0]
+                      << " all numeric N\n";
+            return 1;
+        }
+
+        std::string type_str = argv[2];
+        if (type_str != "numeric") {
+            std::cerr << "Only numeric implemented in this scaffold.\n";
+            return 1;
+        }
+
+        std::size_t n = std::stoull(argv[3]);
+        run_all_numeric(n);
+        return 0;
+    }
+
     if (argc < 5) {
         std::cerr << "Usage: "
                   << argv[0]
