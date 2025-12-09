@@ -25,6 +25,9 @@
 #include <random>
 #include <string>
 #include <vector>
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 using std::uint32_t;
 using std::uint8_t;
@@ -68,14 +71,44 @@ Dataset make_categorical(std::size_t n, std::size_t num_categories = 10'000) {
 // SELECT count(*) WHERE col < x
 // ------------------------------------------------------------
 
-std::size_t full_scan_less(const std::vector<uint32_t>& col, uint32_t x) {
+std::size_t full_scan_less_scalar(const std::vector<uint32_t>& col, uint32_t x) {
     std::size_t cnt = 0;
     const std::size_t n = col.size();
     for (std::size_t i = 0; i < n; ++i) {
-        // if (col[i] < x) cnt++;
-        cnt += (col[i] < x); // unrolled loop/branchless version
+        cnt += (col[i] < x);
     }
     return cnt;
+}
+
+// SIMD-accelerated version (falls back to scalar if AVX2 unavailable)
+std::size_t full_scan_less(const std::vector<uint32_t>& col, uint32_t x) {
+#ifdef __AVX2__
+    const std::size_t n = col.size();
+    const uint32_t* data = col.data();
+    std::size_t cnt = 0;
+
+    const std::size_t step = 8; // 8 × 32-bit ints per AVX2 register
+    const std::size_t n_vec = (n / step) * step;
+
+    __m256i vx = _mm256_set1_epi32(static_cast<int32_t>(x));
+
+    std::size_t i = 0;
+    for (; i < n_vec; i += step) {
+        __m256i v   = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        // v < x  <=>  x > v
+        __m256i cmp = _mm256_cmpgt_epi32(vx, v);
+        int mask    = _mm256_movemask_ps(_mm256_castsi256_ps(cmp));
+        cnt += static_cast<std::size_t>(__builtin_popcount(mask));
+    }
+
+    // Remainder
+    for (; i < n; ++i) {
+        cnt += (data[i] < x);
+    }
+    return cnt;
+#else
+    return full_scan_less_scalar(col, x);
+#endif
 }
 
 // ------------------------------------------------------------
@@ -170,34 +203,96 @@ uint8_t cs_code_for_value(const ColumnSketch& cs, uint32_t x) {
     return static_cast<uint8_t>(pos);
 }
 
-// Probe: SELECT count(*) WHERE base < x using Column Sketch
-std::size_t cs_scan_less(const ColumnSketch& cs,
-    const std::vector<uint32_t>& base,
-    uint32_t x)
+// Scalar probe: SELECT count(*) WHERE base < x using Column Sketch
+std::size_t cs_scan_less_scalar(const ColumnSketch& cs,
+                                const std::vector<uint32_t>& base,
+                                uint32_t x)
 {
-const std::size_t n = base.size();
-const uint8_t* codes = cs.codes.data();
-const uint32_t* b    = base.data();
+    const std::size_t n = base.size();
+    const uint8_t* codes = cs.codes.data();
+    const uint32_t* b    = base.data();
 
-uint8_t sx = cs_code_for_value(cs, x);
-uint32_t sx32 = sx;  // promote once
+    uint8_t sx = cs_code_for_value(cs, x);
+    uint32_t sx32 = sx;  // promote once
 
-std::size_t cnt = 0;
+    std::size_t cnt = 0;
 
-// Branchless loop: the idea is
-// cnt += (code < sx) + ((code == sx) & (base < x));
-for (std::size_t i = 0; i < n; ++i) {
-uint32_t c = codes[i];  // promote to avoid repeated casts
+    // Branchless loop: the idea is
+    // cnt += (code < sx) + ((code == sx) & (base < x));
+    for (std::size_t i = 0; i < n; ++i) {
+        uint32_t c = codes[i];  // promote to avoid repeated casts
 
-// These booleans become 0 or 1; bitwise & keeps it branchless.
-std::size_t less_code  = (c < sx32);
-std::size_t eq_code    = (c == sx32);
-std::size_t less_base  = (b[i] < x);
+        // These booleans become 0 or 1; bitwise & keeps it branchless.
+        std::size_t less_code  = (c < sx32);
+        std::size_t eq_code    = (c == sx32);
+        std::size_t less_base  = (b[i] < x);
 
-cnt += less_code + (eq_code & less_base);
+        cnt += less_code + (eq_code & less_base);
+    }
+
+    return cnt;
 }
 
-return cnt;
+// SIMD-accelerated probe that favors 1-byte codes and only touches base
+// data for boundary-bucket codes.
+std::size_t cs_scan_less(const ColumnSketch& cs,
+                         const std::vector<uint32_t>& base,
+                         uint32_t x)
+{
+#ifdef __AVX2__
+    const std::size_t n = base.size();
+    const uint8_t* codes = cs.codes.data();
+    const uint32_t* b    = base.data();
+
+    uint8_t sx = cs_code_for_value(cs, x);
+
+    std::size_t cnt = 0;
+
+    const std::size_t step = 32; // 32 × 1-byte codes per AVX2 register
+    const std::size_t n_vec = (n / step) * step;
+
+    __m256i v_bias  = _mm256_set1_epi8(static_cast<char>(0x80));
+    __m256i v_sx    = _mm256_set1_epi8(static_cast<char>(sx));
+    __m256i v_sx_s  = _mm256_xor_si256(v_sx, v_bias); // unsigned trick
+
+    std::size_t i = 0;
+    for (; i < n_vec; i += step) {
+        __m256i v_codes   = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes + i));
+        __m256i v_codes_s = _mm256_xor_si256(v_codes, v_bias);
+
+        // codes < sx (unsigned)  via signed compare after XOR with 0x80
+        __m256i lt_mask = _mm256_cmpgt_epi8(v_sx_s, v_codes_s);
+        int lt_bits     = _mm256_movemask_epi8(lt_mask);
+        cnt += static_cast<std::size_t>(__builtin_popcount(lt_bits));
+
+        // codes == sx -> need to consult base
+        __m256i eq_mask = _mm256_cmpeq_epi8(v_codes, v_sx);
+        int eq_bits     = _mm256_movemask_epi8(eq_mask);
+
+        while (eq_bits) {
+            int bit = __builtin_ctz(eq_bits);   // index 0..31
+            eq_bits &= (eq_bits - 1);           // clear lowest set bit
+            std::size_t idx = static_cast<std::size_t>(bit);
+            if (b[i + idx] < x) {
+                ++cnt;
+            }
+        }
+    }
+
+    // Remainder (scalar)
+    for (; i < n; ++i) {
+        uint8_t c = codes[i];
+        if (c < sx) {
+            ++cnt;
+        } else if (c == sx) {
+            if (b[i] < x) ++cnt;
+        }
+    }
+
+    return cnt;
+#else
+    return cs_scan_less_scalar(cs, base, x);
+#endif
 }
 
 // ------------------------------------------------------------
@@ -205,7 +300,7 @@ return cnt;
 // ------------------------------------------------------------
 
 template <typename F>
-double time_seconds(F&& f, int repeats = 5) {
+double time_seconds(F&& f, int repeats = 7) {
     using clock = std::chrono::high_resolution_clock;
     double best = 1e100;
     for (int r = 0; r < repeats; ++r) {
@@ -378,6 +473,11 @@ int main(int argc, char** argv) {
         predicate_value = 300'000'000; // desired selectivity
     } else {
         predicate_value = 5'000;       // about half the categories
+    }
+
+    // Optional override from the command line: argv[5] = predicate value.
+    if (argc >= 6) {
+        predicate_value = static_cast<uint32_t>(std::stoul(argv[5]));
     }
 
     if (method == "scan") {
