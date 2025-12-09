@@ -1,9 +1,9 @@
-# column_sketch
-Query-Aware Column Sketches
+# Query-Aware Column Sketches
 
-Mahika Calyanakoti
+## CIS 6500 Final Project
 
-CIS 6500 Final Project
+### Mahika Calyanakoti
+
 
 ## Problem:
 
