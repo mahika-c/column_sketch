@@ -1,9 +1,16 @@
 // benchmark.cpp
 
+// Copy the file to the remote server
+// scp "/Users/mahikacalyanakoti/Downloads/College/Year4/Year4Sem1/CIS 6500/project/column_sketch/benchmark.cpp" \mahika@biglab.seas.upenn.edu:~/column_sketch/
+
 // Compilation Instructions:
 // g++ -O3 -march=native -std=c++17 -DNDEBUG -funroll-loops benchmark.cpp -o bench
 
 // Running Instructions: (Bash)
+// Small data
+// ./bench all numeric 10000000
+
+// Big data
 // ./bench all numeric 1000000000
 
 // Running Instructions: (Bash)
@@ -352,68 +359,89 @@ double time_seconds(F&& f, int repeats = 7) {
 }
 
 // ------------------------------------------------------------
-// Convenience: run all four configurations in one go
+// Convenience: run all configurations in one go, sweeping selectivities
 // ------------------------------------------------------------
 
 void run_all_numeric(std::size_t n) {
+    // Selectivities to sweep (approximate fractions of tuples qualifying)
+    const std::array<double, 6> selectivities = {0.0, 0.2, 0.4, 0.6, 0.8, 1.0};
+
     // Uniform dataset
     {
         Dataset d = make_uniform_numeric(n);
-        uint32_t predicate_value = 300'000'000; // ~30% selectivity
+        const uint32_t min_v = 0;
+        const uint32_t max_v = 1'000'000'000;
 
-        // Full scan
-        {
-            volatile std::size_t warm = full_scan_less(d.base, predicate_value);
-            (void)warm;
+        std::cout << "=== UNIFORM numeric, n=" << n << " ===\n";
 
-            double secs = time_seconds([&]() {
-                volatile std::size_t res = full_scan_less(d.base, predicate_value);
-                (void)res;
-            });
+        for (double s : selectivities) {
+            // Map selectivity s in [0,1] to a predicate in [min_v, max_v]
+            uint32_t predicate_value;
+            if (s <= 0.0) {
+                predicate_value = min_v;
+            } else if (s >= 1.0) {
+                predicate_value = max_v;
+            } else {
+                predicate_value = static_cast<uint32_t>(s * (max_v - min_v));
+            }
 
-            double tuples_per_sec = static_cast<double>(n) / secs;
-            std::cout << "scan uniform: "
-                      << std::fixed << std::setprecision(6)
-                      << secs << " s, "
-                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
-        }
+            std::cout << "\n-- selectivity ~= " << std::fixed << std::setprecision(2)
+                      << s << " (predicate_value=" << predicate_value << ") --\n";
 
-        // Column Sketch
-        {
-            ColumnSketch cs = build_column_sketch(d.base);
+            // Full scan
+            {
+                volatile std::size_t warm = full_scan_less(d.base, predicate_value);
+                (void)warm;
 
-            volatile std::size_t warm = cs_scan_less(cs, d.base, predicate_value);
-            (void)warm;
+                double secs = time_seconds([&]() {
+                    volatile std::size_t res = full_scan_less(d.base, predicate_value);
+                    (void)res;
+                });
 
-            double secs = time_seconds([&]() {
-                volatile std::size_t res = cs_scan_less(cs, d.base, predicate_value);
-                (void)res;
-            });
+                double tuples_per_sec = static_cast<double>(n) / secs;
+                std::cout << "scan uniform: "
+                          << std::fixed << std::setprecision(6)
+                          << secs << " s, "
+                          << tuples_per_sec / 1e6 << " Mtuples/s\n";
+            }
 
-            double tuples_per_sec = static_cast<double>(n) / secs;
-            std::cout << "cs   uniform: "
-                      << std::fixed << std::setprecision(6)
-                      << secs << " s, "
-                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
-        }
+            // BitWeaving/V
+            {
+                BitWeavingV bw = build_bitweaving_v(d.base);
 
-        // BitWeaving/V
-        {
-            BitWeavingV bw = build_bitweaving_v(d.base);
+                volatile std::size_t warm = bwv_scan_less(bw, predicate_value);
+                (void)warm;
 
-            volatile std::size_t warm = bwv_scan_less(bw, predicate_value);
-            (void)warm;
+                double secs = time_seconds([&]() {
+                    volatile std::size_t res = bwv_scan_less(bw, predicate_value);
+                    (void)res;
+                });
 
-            double secs = time_seconds([&]() {
-                volatile std::size_t res = bwv_scan_less(bw, predicate_value);
-                (void)res;
-            });
+                double tuples_per_sec = static_cast<double>(n) / secs;
+                std::cout << "bwv  uniform: "
+                          << std::fixed << std::setprecision(6)
+                          << secs << " s, "
+                          << tuples_per_sec / 1e6 << " Mtuples/s\n";
+            }
 
-            double tuples_per_sec = static_cast<double>(n) / secs;
-            std::cout << "bwv  uniform: "
-                      << std::fixed << std::setprecision(6)
-                      << secs << " s, "
-                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
+            // Column Sketch
+            {
+                ColumnSketch cs = build_column_sketch(d.base);
+
+                volatile std::size_t warm = cs_scan_less(cs, d.base, predicate_value);
+                (void)warm;
+
+                double secs = time_seconds([&]() {
+                    volatile std::size_t res = cs_scan_less(cs, d.base, predicate_value);
+                    (void)res;
+                });
+
+                double tuples_per_sec = static_cast<double>(n) / secs;
+                std::cout << "cs   UNIFORM: "
+                          << std::fixed << std::setprecision(6)
+                          << secs << " s, "
+                          << tuples_per_sec / 1e6 << " Mtuples/s\n";
+            }
         }
     }
 
@@ -421,62 +449,79 @@ void run_all_numeric(std::size_t n) {
 
     // Categorical dataset
     {
-        Dataset d = make_categorical(n, 10'000);
-        uint32_t predicate_value = 5'000; // about half the categories
+        const std::size_t num_categories = 10'000;
+        Dataset d = make_categorical(n, num_categories);
 
-        // Full scan
-        {
-            volatile std::size_t warm = full_scan_less(d.base, predicate_value);
-            (void)warm;
+        std::cout << "=== CATEGORICAL numeric, n=" << n << " ===\n";
 
-            double secs = time_seconds([&]() {
-                volatile std::size_t res = full_scan_less(d.base, predicate_value);
-                (void)res;
-            });
+        for (double s : selectivities) {
+            // Map selectivity s to category predicate in [0, num_categories]
+            uint32_t predicate_value;
+            if (s <= 0.0) {
+                predicate_value = 0;
+            } else if (s >= 1.0) {
+                predicate_value = static_cast<uint32_t>(num_categories);
+            } else {
+                predicate_value = static_cast<uint32_t>(s * num_categories);
+            }
 
-            double tuples_per_sec = static_cast<double>(n) / secs;
-            std::cout << "scan categorical: "
-                      << std::fixed << std::setprecision(6)
-                      << secs << " s, "
-                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
-        }
+            std::cout << "\n-- selectivity ~= " << std::fixed << std::setprecision(2)
+                      << s << " (predicate_value=" << predicate_value << ") --\n";
 
-        // Column Sketch
-        {
-            ColumnSketch cs = build_column_sketch(d.base);
+            // Full scan
+            {
+                volatile std::size_t warm = full_scan_less(d.base, predicate_value);
+                (void)warm;
 
-            volatile std::size_t warm = cs_scan_less(cs, d.base, predicate_value);
-            (void)warm;
+                double secs = time_seconds([&]() {
+                    volatile std::size_t res = full_scan_less(d.base, predicate_value);
+                    (void)res;
+                });
 
-            double secs = time_seconds([&]() {
-                volatile std::size_t res = cs_scan_less(cs, d.base, predicate_value);
-                (void)res;
-            });
+                double tuples_per_sec = static_cast<double>(n) / secs;
+                std::cout << "scan categorical: "
+                          << std::fixed << std::setprecision(6)
+                          << secs << " s, "
+                          << tuples_per_sec / 1e6 << " Mtuples/s\n";
+            }
 
-            double tuples_per_sec = static_cast<double>(n) / secs;
-            std::cout << "cs   categorical: "
-                      << std::fixed << std::setprecision(6)
-                      << secs << " s, "
-                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
-        }
+            // BitWeaving/V
+            {
+                BitWeavingV bw = build_bitweaving_v(d.base);
 
-        // BitWeaving/V
-        {
-            BitWeavingV bw = build_bitweaving_v(d.base);
+                volatile std::size_t warm = bwv_scan_less(bw, predicate_value);
+                (void)warm;
 
-            volatile std::size_t warm = bwv_scan_less(bw, predicate_value);
-            (void)warm;
+                double secs = time_seconds([&]() {
+                    volatile std::size_t res = bwv_scan_less(bw, predicate_value);
+                    (void)res;
+                });
 
-            double secs = time_seconds([&]() {
-                volatile std::size_t res = bwv_scan_less(bw, predicate_value);
-                (void)res;
-            });
+                double tuples_per_sec = static_cast<double>(n) / secs;
+                std::cout << "bwv  categorical: "
+                          << std::fixed << std::setprecision(6)
+                          << secs << " s, "
+                          << tuples_per_sec / 1e6 << " Mtuples/s\n";
+            }
 
-            double tuples_per_sec = static_cast<double>(n) / secs;
-            std::cout << "bwv  categorical: "
-                      << std::fixed << std::setprecision(6)
-                      << secs << " s, "
-                      << tuples_per_sec / 1e6 << " Mtuples/s\n";
+            // Column Sketch
+            {
+                ColumnSketch cs = build_column_sketch(d.base);
+
+                volatile std::size_t warm = cs_scan_less(cs, d.base, predicate_value);
+                (void)warm;
+
+                double secs = time_seconds([&]() {
+                    volatile std::size_t res = cs_scan_less(cs, d.base, predicate_value);
+                    (void)res;
+                });
+
+                double tuples_per_sec = static_cast<double>(n) / secs;
+                std::cout << "cs   categorical: "
+                          << std::fixed << std::setprecision(6)
+                          << secs << " s, "
+                          << tuples_per_sec / 1e6 << " Mtuples/s\n";
+            }
         }
     }
 }
