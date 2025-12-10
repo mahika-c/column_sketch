@@ -1,10 +1,14 @@
 // benchmark.cpp
 
 // Copy the file to the remote server
-// scp "/Users/mahikacalyanakoti/Downloads/College/Year4/Year4Sem1/CIS 6500/project/column_sketch/benchmark.cpp" \mahika@biglab.seas.upenn.edu:~/column_sketch/
+// scp "/Users/mahikacalyanakoti/Downloads/College/Year4/Year4Sem1/CIS 6500/project/column_sketch/benchmark.cpp" \mahika@speclab.seas.upenn.edu:~/column_sketch/
 
 // Compilation Instructions:
 // g++ -O3 -march=native -std=c++17 -DNDEBUG -funroll-loops benchmark.cpp -o bench
+
+// Performance Instructions:
+// perf stat -e cycles -x, ./bench all numeric 1000000000
+// perf stat ./bench scan uniform numeric 100000000
 
 // Running Instructions: (Bash)
 // Small data
@@ -172,7 +176,7 @@ ColumnSketch build_column_sketch(const std::vector<uint32_t>& base) {
 // ------------------------------------------------------------
 
 struct BitWeavingV {
-    static constexpr int BITS = 16;
+    static constexpr int BITS = 18;
     std::size_t n = 0;         // number of tuples
     std::size_t n_words = 0;   // number of 64-row groups
     // words[w][b] holds bit b (0..31) for rows [64*w, 64*w+63]
@@ -437,7 +441,7 @@ void run_all_numeric(std::size_t n) {
                 });
 
                 double tuples_per_sec = static_cast<double>(n) / secs;
-                std::cout << "cs   UNIFORM: "
+                std::cout << "cs   uniform: "
                           << std::fixed << std::setprecision(6)
                           << secs << " s, "
                           << tuples_per_sec / 1e6 << " Mtuples/s\n";
