@@ -19,11 +19,11 @@ Analytical databases rely heavily on scan performance for predicates such as <, 
 
 * Compare performance for numeric (4B, 8B) and categorical data under varying selectivities.
 
-* Expect Column Sketch to outperform scans by ~3x–6x and BitWeaving by ~1.4x in cycles/tuple.
+* Expect Column Sketch to outperform scans and BitWeaving in cycles/tuple.
 
 ### Query-Aware Column Sketch (QACS):
 
-* Adapt code assignments to frequent predicates (“hot values”) to reduce fallback to base data. ***
+* Adapt code assignments to frequent predicates (“hot values”) to reduce fallback to base data.
 
 * Implement some hard-coded query-aware column sketches for some data and associated queries and compare it to a general column sketch for that same data.
 
