@@ -204,9 +204,15 @@ int main(int argc, char** argv) {
         n = static_cast<std::size_t>(std::stoull(argv[1]));
     }
 
-    std::cout << "QACS demo: n = " << n << " (skewed categorical)\n";
+    double p_hot = 0.8;
+    if (argc >= 3) {
+        p_hot = std::stod(argv[2]);
+    }
 
-    DatasetCat d = make_skewed_categorical(n);
+    std::cout << "QACS demo: n = " << n
+              << " (skewed categorical, p_hot=" << p_hot << ")\n";
+
+    DatasetCat d = make_skewed_categorical(n, 10000, p_hot);
 
     // Define hot values {0,1,2,3}
     // queries will be skewed to these
